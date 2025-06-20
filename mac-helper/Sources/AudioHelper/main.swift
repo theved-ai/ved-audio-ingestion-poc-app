@@ -1,33 +1,47 @@
 import Foundation
-import AppKit                                  
+import AppKit
+
+@_cdecl("sig_handler")
+func sig_handler(_ sig: Int32) -> Void {
+    Runner.stopAndExit()
+}
 
 
-@main
 struct Runner {
 
+    private static var capture: Capture?
+
+    // called by the C trampoline above
+    static func stopAndExit() {
+        capture?.stop()
+        exit(EXIT_SUCCESS)
+    }
+
     static func main() async {
+        _ = await NSApplication.shared       // `.shared` is async in Swift 6
 
-        _ = NSApplication.shared               // first runtime statement
-
-        // ----- command-line arg or default  -----
-        let bundleId = CommandLine.arguments.dropFirst().first
-                    ?? "com.google.Chrome"
+        let bundle = CommandLine.arguments.dropFirst().first
+                   ?? "com.google.Chrome"
 
         do {
-            let cap = Capture(bundleId: bundleId)
+            let cap = Capture(bundleId: bundle)
+            capture = cap
             try await cap.start()
 
-            // register signal handlers *after* success
-            signal(SIGTERM) { _ in cap.stop(); exit(EXIT_SUCCESS) }
-            signal(SIGINT ) { _ in cap.stop(); exit(EXIT_SUCCESS) }
+            // register the **plain C** handler
+            signal(SIGTERM, sig_handler)
+            signal(SIGINT , sig_handler)
 
-            // keep process alive forever
-            let day: UInt64 = 86_400 * 1_000_000_000
-            while true { try await Task.sleep(nanoseconds: day) }
+            // keep helper alive forever
+            let oneDay: UInt64 = 86_400 * 1_000_000_000
+            while true { try await Task.sleep(nanoseconds: oneDay) }
 
         } catch {
-            fputs("[helper] error: \(error)\n", stderr)
+            fputs("[helper] \(error)\n", stderr)
             exit(EXIT_FAILURE)
         }
     }
 }
+
+
+await Runner.main()
