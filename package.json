@@ -1,0 +1,33 @@
+{
+  "name": "pensieve-recorder-poc",
+  "version": "0.0.1",
+  "description": "Electron PoC – ScreenCaptureKit + mic merge, stream 3-s audio chunks",
+  "main": "electron/main.js",
+  "type": "commonjs",
+
+  "scripts": {
+    "postinstall": "swift build -c release --package-path mac-helper",
+    "start": "electron .",
+    "pack":  "electron-builder --dir",
+    "dist":  "electron-builder"
+  },
+
+  "build": {
+    "files": [
+      "electron/**/*",
+      "mac-helper/.build/release/AudioHelper"
+    ],
+    "mac": {
+      "entitlements": "entitlement.plist",
+      "hardenedRuntime": true
+    }
+  },
+
+  "dependencies": {
+    "electron": "^29.0.0"
+  },
+
+  "devDependencies": {
+    "electron-builder": "^24.13.1"
+  }
+}

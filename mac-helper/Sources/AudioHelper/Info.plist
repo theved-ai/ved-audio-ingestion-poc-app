@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key> <string>ai.pensieve.AudioHelper</string>
+  <key>CFBundleExecutable</key> <string>AudioHelper</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Pensieve needs the mic to merge with meeting audio</string>
+  <key>NSScreenCaptureDescription</key>
+  <string>Required to access system audio via ScreenCaptureKit</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Pensieve records system audio for meeting transcription</string>
+</dict>
+</plist>
