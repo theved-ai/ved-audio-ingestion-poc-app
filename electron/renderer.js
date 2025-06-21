@@ -50,25 +50,17 @@ ipcRenderer.invoke('get-helper-path').then(helperPath => {
 
     timerId = setInterval(() => {
       if (!buffers.length || ws.readyState !== WebSocket.OPEN) return;
-
-      /* 1️⃣  freeze the data *now* */
       const chunk = Buffer.concat(buffers);
       buffers.length = 0;               // reset array
-
-      /* 2️⃣  nothing to send? */
       if (chunk.length === 0) return;
-
-      /* 3️⃣  encode */
       const b64 = chunk.toString('base64');
-
-      /* 4️⃣  ship */
       ws.send(JSON.stringify({
         event_type: 'audio_chunk',
         payload: {
           input_data_source : 'meet_transcript',
           user_id           : USER_ID,
           raw_data_id       : rawDataId,
-          audio_format      : 'pcm',        // good – backend will write “.pcm”
+          audio_format      : 'f32le',
           audio_chunk_index : idx++,
           audio_blob        : b64
         }
