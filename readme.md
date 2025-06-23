@@ -8,6 +8,14 @@
 
 ---
 
+## 🧠 Project Summary
+
+**Pensieve** is a desktop app for capturing live conversations (e.g. Google Meet, YouTube lectures) in Chrome tabs — along with optional mic audio
+
+> The captured stream is chunked, encoded to base64, and streamed to a backend service for transcription.
+
+---
+
 ## 1  Project layout
 
 | Path                        | What it is                                                                                                                                            |
