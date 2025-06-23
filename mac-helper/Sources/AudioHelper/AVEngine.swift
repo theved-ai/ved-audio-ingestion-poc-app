@@ -1,86 +1,136 @@
 //  AVEngine.swift
-//  -----------------------------------------------------------
-//  • merges tab-audio (left channel, Float32 stereo)
-//    with microphone (Float32 mono) **sample-accurately**
-//  • emits mono, 48 kHz, Float32 little-endian  (“f32le”)
-//  • zero-copy on the hot path, zero audible output
-//  -----------------------------------------------------------
+//  -----------------------------------------------------------------
+//  One engine – three modes:
+//
+//      ┌─────────┬────────────────────────────┐
+//      │  .tabOnly│   tab → pcmOut            │
+//      │  .micOnly│   mic → pcmOut            │
+//      │  .mix    │   0.5·tab + 0.5·mic → out │
+//      └─────────┴────────────────────────────┘
+//
+//  All data is Float-32, mono, 48 kHz  (“f32le” once it hits stdout)
+//  -----------------------------------------------------------------
 
 import AVFoundation
 
 @inline(__always)
-private func dataFromMonoBuffer(_ ptr: UnsafePointer<Float>,
-                                frames: Int) -> Data {
-    Data(bytes: ptr,
-         count: frames * MemoryLayout<Float>.size)
+private func dataFrom(buffer: [Float]) -> Data {
+    Data(bytes: buffer, count: buffer.count * MemoryLayout<Float>.size)
 }
+
+@inline(__always)
+private func dequeue<T>(_ array: inout [T]) -> T? {
+    guard !array.isEmpty else { return nil }
+    return array.removeFirst()
+}
+
 
 final class AVEngine {
 
-    // ───────── public API ─────────
+    // MARK:  – mode ---------------------------------------------------------
 
-    /// Feed one ScreenCaptureKit **stereo / f32 / 48 kHz** buffer.
-    /// Only the left channel (index 0) is used.
-    func feed(tabPCM_F32_stereo buf: AVAudioPCMBuffer) {
-        guard let l = buf.floatChannelData?.pointee else { return }
-        let frames  = Int(buf.frameLength)
+    enum Mode { case tabOnly, micOnly, mix }
 
-        micQ.async { [self] in
-            guard !micRing.isEmpty else { return }
-            let mic = micRing.removeFirst()               // ← fixed (no popFirst)
+    // MARK:  – public API ---------------------------------------------------
 
-            /* ---- merge tab-L + mic → mono ---- */
-            var mono = [Float](repeating: 0, count: frames)
-            for i in 0..<frames {
-                mono[i] = 0.5 * (l[i * 2] + mic[i])       // 50 / 50 mix
-            }
-            mono.withUnsafeBufferPointer { ptr in
-                pcmOut( dataFromMonoBuffer(ptr.baseAddress!, frames: frames) )
-            }
+    /// Push one **stereo / Float-32** buffer that came from ScreenCaptureKit
+    /// (only *left* is kept).
+    func feed(tabPCM_F32_stereo pcm: AVAudioPCMBuffer) {
+        guard mode != .micOnly,                    // ignore tab in mic-only mode
+              let l = pcm.floatChannelData?.pointee else { return }
+
+        let frames = Int(pcm.frameLength)
+        tabQ.async {
+            self.tabBuffers.append(
+                Array(UnsafeBufferPointer(start: l, count: frames))
+            )
+            self.maybeEmit()
         }
     }
 
     func start() throws { try engine.start() }
-    func stop ()        { engine.stop(); micRing.removeAll() }
+    func stop()  { engine.stop(); micBuffers.removeAll(); tabBuffers.removeAll() }
 
-    // ───────── life-cycle ─────────
+    // MARK:  – life-cycle ---------------------------------------------------
 
-    /// `pcmOut` receives **Float32/mono/48 kHz** data – ready for b64.
-    init(pcmOut: @escaping (Data) -> Void) {
-        self.pcmOut = pcmOut
+    init(mode: Mode = .mix,
+         sampleRate: Double = 48_000,
+         pcmOut: @escaping (Data) -> Void) {
 
-        /* 1⃣ mic → tap → small ring-buffer */
+        self.mode      = mode
+        self.pcmOut    = pcmOut
+        self.sampleRate = sampleRate
+
+        // ── mic tap ────────────────────────────────────────────────────────
         let mic     = engine.inputNode
         let micFmt  = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                    sampleRate: sampleRate,
-                                    channels: 1,
+                                    sampleRate : sampleRate,
+                                    channels   : 1,
                                     interleaved: false)!
 
         mic.installTap(onBus: 0,
                        bufferSize: 256,
                        format: micFmt) { [weak self] buf, _ in
             guard let self,
-                  let src = buf.floatChannelData?.pointee else { return }
-            let frames = Int(buf.frameLength)
+                  self.mode != .tabOnly,                       // ignore in tab-only
+                  let ch = buf.floatChannelData?.pointee else { return }
 
-            /* store one mic block (copy) – VERY small & fast */
+            let frames = Int(buf.frameLength)
             self.micQ.async {
-                self.micRing.append(
-                    Array(UnsafeBufferPointer(start: src, count: frames))
+                self.micBuffers.append(
+                    Array(UnsafeBufferPointer(start: ch, count: frames))
                 )
-                /* keep ring at most 5 blocks */
-                if self.micRing.count > 5 { self.micRing.removeFirst() }
+                self.maybeEmit()
             }
         }
     }
 
-    // ───────── private state ─────────
+    // MARK:  – private helpers ---------------------------------------------
+
+    /// If at least one side (or both, in `.mix`) is ready – emit.
+    private func maybeEmit() {
+        switch mode {
+
+        case .tabOnly:
+            if let tab = dequeue(&tabBuffers) {
+                pcmOut( dataFrom(buffer: tab) )
+            }
+
+        case .micOnly:
+            if let mic = dequeue(&micBuffers) {
+                pcmOut( dataFrom(buffer: mic) )
+            }
+
+        case .mix:
+            if let tab = dequeue(&tabBuffers),
+            let mic = dequeue(&micBuffers),
+            tab.count == mic.count {
+
+                var mono = [Float](repeating: 0, count: tab.count)
+                for i in 0..<mono.count { mono[i] = 0.5 * (tab[i] + mic[i]) }
+                pcmOut( dataFrom(buffer: mono) )
+
+            } else if let tab = dequeue(&tabBuffers) {
+                pcmOut( dataFrom(buffer: tab) )
+
+            } else if let mic = dequeue(&micBuffers) {
+                pcmOut( dataFrom(buffer: mic) )
+            }
+
+        }
+    }
+
+    // MARK:  – ivars --------------------------------------------------------
+
+    private let mode: Mode
+    private let sampleRate: Double
+    private let pcmOut: (Data) -> Void
 
     private let engine  = AVAudioEngine()
-    private let micQ    = DispatchQueue(label: "mic.merge.q")
 
-    private var micRing: [[Float]] = []        // tiny FIFO, < 100 ms
-    private let pcmOut : (Data) -> Void
+    private let micQ    = DispatchQueue(label: "pcm.mic.q")
+    private let tabQ    = DispatchQueue(label: "pcm.tab.q")
 
-    private let sampleRate: Double = 48_000
+    private var micBuffers: [[Float]] = []
+    private var tabBuffers: [[Float]] = []
 }

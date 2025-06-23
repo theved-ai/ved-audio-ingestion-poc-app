@@ -1,6 +1,6 @@
 # Pensieve App — Audio‑capture Proof‑of‑Concept
 
-> **Status : parked (2025‑06‑21)**
+> **Status : parked**
 >
 > Development is on hold while the audio‑path issues are investigated. This
 > README captures everything that currently works, commands to reproduce the
@@ -32,19 +32,13 @@
 ## 3  Build & run
 
 ```bash
-# 1⃣ Install JS deps & build Electron bits
+brew install ffmpeg
 npm install
-npm run rebuild-native   # still needed for the Node‑API shim (optional)
 
-# 2⃣ Build Swift helper (Release)
 cd mac-helper
 swift build -c release   # product is .build/release/AudioHelper
 cd ..
 
-# 3⃣ Start backend (FastAPI) in a venv
-uvicorn main:app --reload   # not committed, local only
-
-# 4⃣ Run the desktop UI
 npm start                  # spawns Electron
 ```
 
@@ -54,51 +48,54 @@ npm start                  # spawns Electron
 
 These are **must‑run** before touching the JS side.
 
-| Test             | Command                                             |                                               |            |
-| ---------------- | --------------------------------------------------- | --------------------------------------------- | ---------- |
-| **Dry tab only** | `./AudioHelper com.google.Chrome --dry‑tab \`<br>\` | ffplay -f f32le -ar 48000 -ac 1 -\`           |            |
-| **Dry mic only** | `./AudioHelper com.google.Chrome --dry‑mic \`<br>\` | ffplay -f f32le -ar 48000 -ac 1 -\`           |            |
-| **Dry merged**   | `./AudioHelper com.google.Chrome \`<br>\`           | ffmpeg -f f32le -ar 48000 -ac 1 -i - -f wav - | ffplay -\` |
+**Dry tab only** => ./mac-helper/.build/release/AudioHelper com.google.Chrome --dry-tab | ffmpeg -f f32le -ar 48000 -ac 1 -i - -f wav - | ffplay -
 
-./AudioHelper com.google.Chrome --dry-mic | ffmpeg -f s16le -ar 48000 -ac 2 -i - -f wav - | ffplay - ==> only tab audio
-./AudioHelper com.google.Chrome --dry-tab | ffmpeg -f f32le -ar 48000 -ac 1 -i - -f wav - | ffplay - ==> only mic audio
+**Dry mic only** => ./mac-helper/.build/release/AudioHelper com.google.Chrome --dry‑mic | ffmpeg -f f32le -ar 48000 -ac 1 -i - -f wav - | ffplay -
 
-> \:warning: At the moment all three commands play *white‑noise like garbage* →
-> proves the helper is emitting the **wrong format** (see §5).
+**Dry merged** => ./mac-helper/.build/release/AudioHelper com.google.Chrome | ffmpeg -f f32le -ar 48000 -ac 1 -i - -f wav - | ffplay -
+
+> 🔈 Previously, all three produced hiss/garbage — traced to ScreenCaptureKit
+> emitting *compressed* audio. Now, after switching to
+> `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer`, audio is **clear**.
+>
+> ❗ However, **audio chunks repeat** — same buffer is replayed.
 
 ---
 
 ## 5  Findings so far
 
-* **ScreenCaptureKit format** — without `cfg.audioCodec = .pcm` (macOS 14+) the
-  buffer we pull via `CMSampleBufferGetDataBuffer` is *not* raw Float‑32 PCM –
-  likely AAC. Treating those bytes as floats ⇒ hiss.
-* **Correct way** is to fetch the `AudioBufferList` from the `CMSampleBuffer`
-  (QuickRecorder does this).
-* **Merging path** – current `AVEngine` converts mic/tap to Float‑32 mono and
-  mixes 50/50, but still uses the bad tab bytes → distorted output.
-* **Backend** – when fed a *good* 48 kHz f32le mono file Whisper works fine.
+* **Audio format** — ScreenCaptureKit does not expose raw LPCM unless we
+  extract via `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer`.
+* Using `.pcm` codec in `SCStreamConfiguration` is only available in **macOS 14+**.
+* With correct Float32 stereo frames extracted, mono-mix is playable.
+* Repetition issue caused by enqueued buffers not being cleared fast enough
+  (possibly fed into stdout without dequeue).
+* Earlier it appeared clear only because mic was re-recording speaker.
 
 ---
 
 ## 6  Open problems / TODO
 
-1. **Fix helper delegate**
+1. **Fix replay issue**
 
-   * Use `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` and inspect
-     the ASBD. Confirm format is `lpcm`, 32‑bit float, **non‑interleaved**.
-2. **Force PCM in config** (macOS 14):
+   * Ensure `micBuffers` and `tabBuffers` are correctly dequeued in `.maybeEmit()`
+   * Avoid unintentional retain/reuse of buffers
 
-   ```swift
-   if #available(macOS 14.0, *) {
-       cfg.audioCodec = .pcm
-       cfg.audioChannelCount = 1
-   }
-   ```
-3. **Verify with ffplay** – repeat the three dry tests until they sound clean.
-4. **Re‑enable Electron pipeline** – once stdout is correct, the renderer’s
-   base‑64 chunks should decode to valid wave and Whisper will align.
-5. **Echo / local monitoring** – optional: expose a gain slider; default to 0.
+2. **Detect Meet's mic status**
+
+   * JS-side poll for mute/unmute state
+   * Or get `chrome.tabCapture.getCapturedTabs()`
+   * Dynamically enable/disable mic feed in `AVEngine`
+
+3. **Improve merge**
+
+   * Handle unequal buffer sizes gracefully
+   * Optionally include silence padding
+
+4. **Consider virtual mic driver**
+
+   * Ship a HAL plugin that Chrome can select as audio input
+   * Guarantees alignment and removes speaker feedback loop
 
 ---
 
@@ -109,16 +106,17 @@ These are **must‑run** before touching the JS side.
 log stream --predicate 'subsystem == "com.apple.audio"' --info
 
 # Listen to helper output via sox (alternative to ffplay)
-./AudioHelper com.google.Chrome | sox -t f32 -r 48k -c1 - -d
+./mac-helper/.build/release/AudioHelper com.google.Chrome | sox -t f32 -r 48k -c1 - -d
 ```
 
 ---
 
-## 8  Parking notice
+## 8. Collaborators
+If you're looking into this from my shared repo:
 
-Development paused **2025‑06‑21** after confirming that ScreenCaptureKit is
-feeding compressed data. Next session should start with *Step 1* in **Open
-problems** above.
+👉 Start by testing the mac-helper output directly with ffplay (section 3)
 
-Happy hacking — see you later!
-*— A.*
+👉 Reference: QuickRecorder uses a correct sample buffer → AudioBufferList approach
+https://github.com/lihaoyun6/QuickRecorder/
+
+Thanks 🙏 — feel free to DM me or open an issue if you debug further!

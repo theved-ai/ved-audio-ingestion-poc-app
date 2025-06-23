@@ -56,48 +56,67 @@ final class Capture: NSObject {
 extension Capture: SCStreamOutput {
 
     func stream(_ stream: SCStream,
-            didOutputSampleBuffer sb: CMSampleBuffer,
-            of outputType: SCStreamOutputType) {
+                didOutputSampleBuffer sb: CMSampleBuffer,
+                of outputType: SCStreamOutputType)
+    {
+        guard outputType == .audio else { return }
 
-        guard outputType == .audio,
-            let block = CMSampleBufferGetDataBuffer(sb) else { return }
+        // 1⃣  Ask CM to materialise an AudioBufferList for us
+        var ablSizeNeeded = 0
+        let abl = AudioBufferList.allocate(maximumBuffers: 2)
+        var blockBuf: CMBlockBuffer?
 
-        /* raw pointer + size -------------------------------------------------- */
-        var len = 0; var ptr: UnsafeMutablePointer<Int8>?
-        CMBlockBufferGetDataPointer(block,
-                                    atOffset: 0,
-                                    lengthAtOffsetOut: nil,
-                                    totalLengthOut: &len,
-                                    dataPointerOut: &ptr)
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sb,
+            bufferListSizeNeededOut: &ablSizeNeeded,
+            bufferListOut: &abl.unsafeMutablePointer.pointee,
+            bufferListSize: MemoryLayout<AudioBufferList>.size,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment),
+            blockBufferOut: &blockBuf
+        )
+        guard status == noErr else { return }
 
-        /* we captured **Float-32 / stereo / 48 kHz / interleaved** ------------ */
-        let frames = len / MemoryLayout<Float>.size / 2
-        guard frames > 0,
-            let p = ptr?.withMemoryRebound(to: Float.self,
-                                            capacity: frames * 2,
-                                            { $0 })          // Float32 *
+        // 2⃣  Format sanity-check — we expect 32-bit float, **non-interleaved**
+        guard let fmtDesc = CMSampleBufferGetFormatDescription(sb),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc),
+              asbd.pointee.mFormatID == kAudioFormatLinearPCM,
+              asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+              asbd.pointee.mBitsPerChannel == 32,
+              asbd.pointee.mChannelsPerFrame == 2
         else { return }
 
-        /* create a *planar* buffer that AVEngine wants (non-interleaved) ------ */
-        let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                sampleRate : 48_000,
-                                channels   : 2,
-                                interleaved: false)!
+        let frames = Int(CMSampleBufferGetNumSamples(sb))
+        guard frames > 0 else { return }
 
-        guard let pcm = AVAudioPCMBuffer(pcmFormat: fmt,
-                                        frameCapacity: AVAudioFrameCount(frames))
+        // 3⃣  Build an AVAudioPCMBuffer (planar / mono L+R)
+        let avFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                  sampleRate : 48_000,
+                                  channels   : 2,
+                                  interleaved: false)!
+
+        guard let pcm = AVAudioPCMBuffer(pcmFormat: avFmt,
+                                         frameCapacity: AVAudioFrameCount(frames))
         else { return }
-
         pcm.frameLength = pcm.frameCapacity
-        let l = pcm.floatChannelData![0]
-        let r = pcm.floatChannelData![1]
 
-        for i in 0..<frames {
-            l[i] = p[i * 2]       // left
-            r[i] = p[i * 2 + 1]   // right
-        }
+        // 4⃣  Copy the two planes (left/right) from the ABL into the AVAudioPCMBuffer
+        let left  = pcm.floatChannelData![0]
+        let right = pcm.floatChannelData![1]
 
-        /* hand the buffer to the mixer/merger ------------------------------- */
+        // ScreenCaptureKit delivers **non-interleaved** float32 - one AudioBuffer per channel
+        let audioBufL = abl[0]
+        let audioBufR = abl[1]
+
+        memcpy(left,
+               audioBufL.mData!,
+               Int(audioBufL.mDataByteSize))
+        memcpy(right,
+               audioBufR.mData!,
+               Int(audioBufR.mDataByteSize))
+
+        // 5⃣  Hand off to the merging engine
         engine.feed(tabPCM_F32_stereo: pcm)
     }
 }
